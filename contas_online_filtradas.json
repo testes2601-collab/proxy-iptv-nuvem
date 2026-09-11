@@ -1,0 +1,74 @@
+[
+    {
+        "status": true,
+        "id": "meusrv_5",
+        "host": "http://meusrv.top:80",
+        "user": "HUuCFJ",
+        "pass": "Sv6z3x",
+        "expira": "18/03/2027",
+        "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)"
+    },
+    {
+        "status": true,
+        "id": "meusrv_7",
+        "host": "http://meusrv.top:80",
+        "user": "171769357",
+        "pass": "782164797",
+        "expira": "14/10/2026",
+        "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)"
+    },
+    {
+        "status": true,
+        "id": "meusrv_4",
+        "host": "http://meusrv.top:80",
+        "user": "461572994",
+        "pass": "644621735",
+        "expira": "15/04/2027",
+        "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)"
+    },
+    {
+        "status": true,
+        "id": "meusrv_6",
+        "host": "http://meusrv.top:80",
+        "user": "74468590",
+        "pass": "448420959",
+        "expira": "13/03/2027",
+        "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)"
+    },
+    {
+        "status": true,
+        "id": "meusrv_8",
+        "host": "http://meusrv.top:80",
+        "user": "361811331",
+        "pass": "252766314",
+        "expira": "14/10/2026",
+        "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)"
+    },
+    {
+        "status": true,
+        "id": "meusrv_1",
+        "host": "http://meusrv.top:80",
+        "user": "567689135",
+        "pass": "965722522",
+        "expira": "08/05/2027",
+        "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)"
+    },
+    {
+        "status": true,
+        "id": "meusrv_3",
+        "host": "http://meusrv.top:80",
+        "user": "395688158",
+        "pass": "233953775",
+        "expira": "27/04/2027",
+        "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)"
+    },
+    {
+        "status": true,
+        "id": "meusrv_2",
+        "host": "http://meusrv.top:80",
+        "user": "955823677",
+        "pass": "798597634",
+        "expira": "27/04/2027",
+        "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)"
+    }
+]
