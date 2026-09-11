@@ -1,4 +1,3 @@
-```
 from config import CHROME_HEADERS
 
 try:
@@ -10,8 +9,8 @@ except ImportError:
 
 def criar_sessao_chrome():
     """
-    Cria uma sessão HTTP simulando o Google Chrome 122 real
-    para evitar bloqueios de rede da Cloudflare na nuvem.
+    Cria uma sessão HTTP que simula o Google Chrome 122 real
+    para evitar bloqueios da Cloudflare na nuvem.
     """
     if HAS_CURL_CFFI:
         session = requests.Session(impersonate="chrome122")
@@ -20,5 +19,3 @@ def criar_sessao_chrome():
     
     session.headers.update(CHROME_HEADERS)
     return session
-
-```
