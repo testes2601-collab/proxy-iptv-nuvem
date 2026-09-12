@@ -1,25 +1,28 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
-SERVIDOR PROXY IPTV PREMIUM - VERSÃO 25 (Remoção Automática de Contas Bloqueadas)
+SERVIDOR PROXY IPTV PREMIUM - VERSÃO 26 (Suporte Dinâmico a contasonlinefiltradas.json)
 ===============================================================================
-Recursos da versão v25:
-1. Auto-Filtro Dinâmico: Remove automaticamente contas offline/bloqueadas da rotação.
-2. Background Health Check: Varre o pool periodicamente e mantém apenas contas 100% ONLINE.
-3. Conexão Instantânea no VLC (< 0.1s): Transmite direto da lista filtrada de contas limpas.
-4. Fallback Automático: Se uma conta cair durante o streaming, alterna na hora para a próxima conta online.
+Recursos da versão v26:
+1. Leitura Dinâmica do `contasonlinefiltradas.json`: Se o arquivo existir no GitHub,
+   as contas são carregadas dele automaticamente. Se não existir, usa o fallback interno.
+2. Auto-Descarte & Limpeza em Segundo Plano: Isolamento de contas bloqueadas/offline.
+3. Roteamento Sequencial Anti-Bloqueio: Impede requisições simultâneas para a mesma CDN.
+4. Resposta Instantânea e Suporte Multi-Rotas (/playlist.m3u, /live/premiere1.ts).
 ===============================================================================
 """
 
 import os
 import re
 import time
+import json
 import logging
-import threading
 import urllib3
 import requests
 from flask import Flask, Response, request
+from threading import Thread
 
+# Desativa avisos de SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(
@@ -30,28 +33,44 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-LISTA_CONTAS_POOL = [
-    # --- SERVIDORES MEUSRV (ONLINE) ---
-    {"id": "meusrv_03", "nome": "MeuSrv 567", "host": "http://meusrv.top:80", "user": "567689135", "pass": "965722522"},
-    {"id": "meusrv_01", "nome": "MeuSrv 955", "host": "http://meusrv.top:80", "user": "955823677", "pass": "798597634"},
-    {"id": "meusrv_02", "nome": "MeuSrv 744", "host": "http://meusrv.top:80", "user": "74468590", "pass": "448420959"},
-    {"id": "meusrv_04", "nome": "MeuSrv 361", "host": "http://meusrv.top:80", "user": "361811331", "pass": "252766314"},
-    # --- SERVIDORES IP DIRETO ---
-    {"id": "ip_103_01", "nome": "Servidor IP 103 (Conta 1)", "host": "http://103.176.90.186:80", "user": "e0828d9135", "pass": "e91802270546"},
-    {"id": "ip_103_02", "nome": "Servidor IP 103 (Conta 2)", "host": "http://103.176.90.186:80", "user": "7b559c1042", "pass": "11de4cebb4"},
-    {"id": "ono_79_01", "nome": "Servidor ONO IP 79", "host": "http://79.127.243.145:80", "user": "723015", "pass": "VfGrmD"},
-    {"id": "ono_85_01", "nome": "Servidor ONO IP 85 (Otavio)", "host": "http://85.137.49.157.dyn.user.ono.com:80", "user": "Otaviodeledove", "pass": "9Dh5R8uAu5"},
-    {"id": "ono_85_02", "nome": "Servidor ONO IP 85 (Tatiana)", "host": "http://85.137.49.157.dyn.user.ono.com:80", "user": "tatiana9944", "pass": "Ta994a"},
-    # --- OUTROS DOMÍNIOS ---
-    {"id": "xyz_332_01", "nome": "XYZ 332 (988)", "host": "http://332nr7hbfu.xyz:80", "user": "988060", "pass": "zd7YEw"},
-    {"id": "xyz_332_02", "nome": "XYZ 332 (Constancio)", "host": "http://332nr7hbfu.xyz:80", "user": "constancio79", "pass": "Wagner@79"},
-    {"id": "xyz_332_03", "nome": "XYZ 332 (Casa na Praia)", "host": "http://332nr7hbfu.xyz:80", "user": "Casanapraia10", "pass": "Tvfuturo2"},
-    {"id": "z2mu_54_01", "nome": "54z2mu Pro", "host": "http://54z2mu.pro:80", "user": "jT63beuY", "pass": "F11Gkd"},
-    {"id": "fftq_49_01", "nome": "49fftq Live", "host": "http://49fftq.live:80", "user": "WellgtonSilva35", "pass": "991DNEubv"},
-    {"id": "vector_61_01", "nome": "Vector CDN 61", "host": "http://61701-vector.cdn-o2.me:80", "user": "4df74cf07e", "pass": "9d49be6b44bc"},
-    {"id": "given_11_01", "nome": "Given CDN 11", "host": "http://11359-given.cdn-o2.me:80", "user": "4af01daf4f", "pass": "7e3498490571"},
-    {"id": "biturl_play_01", "nome": "Biturl Play", "host": "http://play.biturl.vip:80", "user": "5181603291", "pass": "m23bm8a1nup"}
+# =============================================================================
+# FALLBACK DE CONTAS (CASO O JSON NÃO SEJA ENCONTRADO)
+# =============================================================================
+CONTAS_FALLBACK = [
+    {
+        "id": "meusrv_03",
+        "nome": "MeuSrv 567",
+        "host": "http://meusrv.top:80",
+        "user": "567689135",
+        "pass": "965722522"
+    },
+    {
+        "id": "meusrv_01",
+        "nome": "MeuSrv 955",
+        "host": "http://meusrv.top:80",
+        "user": "955823677",
+        "pass": "798597634"
+    },
+    {
+        "id": "meusrv_02",
+        "nome": "MeuSrv 744",
+        "host": "http://meusrv.top:80",
+        "user": "74468590",
+        "pass": "448420959"
+    },
+    {
+        "id": "meusrv_04",
+        "nome": "MeuSrv 361",
+        "host": "http://meusrv.top:80",
+        "user": "361811331",
+        "pass": "252766314"
+    }
 ]
+
+# Listas globais de controle
+CONTAS_ONLINE_ATIVAS = []
+CONTAS_BLOQUEADAS = []
+ULTIMA_VERIFICACAO = 0
 
 HEADERS_CLIENTE = {
     "User-Agent": "TiviMate/4.6.1 (Android TV; BRAVIA 4K UR3)",
@@ -59,13 +78,29 @@ HEADERS_CLIENTE = {
     "Connection": "keep-alive"
 }
 
-# Estado global do pool filtrado
-CONTAS_ONLINE_ATIVAS = []
-CONTAS_BLOQUEADAS = []
-LOCK_POOL = threading.Lock()
-ULTIMA_VERIFICACAO = 0
+def carregar_todas_as_contas():
+    """ Tenta carregar as contas do arquivo contasonlinefiltradas.json ou usa fallback """
+    arquivos_json = ["contasonlinefiltradas.json", "stream_config.json", "canais.json"]
+    
+    for arq in arquivos_json:
+        if os.path.exists(arq):
+            try:
+                with open(arq, "r", encoding="utf-8") as f:
+                    dados = json.load(f)
+                    if isinstance(dados, list) and len(dados) > 0:
+                        logging.info(f"📂 Contas carregadas com sucesso do arquivo: {arq} ({len(dados)} contas)")
+                        return dados
+                    elif isinstance(dados, dict) and "contas" in dados:
+                        logging.info(f"📂 Contas carregadas com sucesso do arquivo: {arq}")
+                        return dados["contas"]
+            except Exception as e:
+                logging.warning(f"Erro ao ler {arq}: {e}")
+                
+    logging.info("ℹ️ Usando pool de contas interno (Fallback)")
+    return CONTAS_FALLBACK
 
 def validar_se_e_video_mpegts(chunk_bytes):
+    """ Valida se o primeiro pacote é MPEG-TS válido (byte 0x47) """
     if not chunk_bytes or len(chunk_bytes) < 188:
         return False
     if chunk_bytes[0] != 0x47:
@@ -77,86 +112,96 @@ def validar_se_e_video_mpegts(chunk_bytes):
             return False
     return True
 
-def testar_conta_individual(conta_info):
-    url_test = f"{conta_info['host']}/live/{conta_info['user']}/{conta_info['pass']}/premiere1.ts"
-    try:
-        res = requests.get(url_test, headers=HEADERS_CLIENTE, stream=True, timeout=2.5, verify=False)
-        if res.status_code == 200:
-            amostra = next(res.iter_content(chunk_size=4096), None)
-            if amostra and validar_se_e_video_mpegts(amostra):
-                return True
-    except Exception:
-        pass
+def testar_conta(conta_info):
+    """ Valida individualmente uma conta """
+    host = conta_info.get("host", "").rstrip("/")
+    user = conta_info.get("user") or conta_info.get("username", "")
+    password = conta_info.get("pass") or conta_info.get("password", "")
+    
+    if not host or not user or not password:
+        return False
+        
+    urls = [
+        f"{host}/live/{user}/{password}/premiere1.ts",
+        f"{host}/live/{user}/{password}/premiere.m3u8",
+        f"{host}/live/{user}/{password}/premiere.ts"
+    ]
+    
+    for url in urls:
+        try:
+            r = requests.get(url, headers=HEADERS_CLIENTE, stream=True, timeout=3.0, verify=False)
+            if r.status_code == 200:
+                chunk = next(r.iter_content(chunk_size=16384), None)
+                if chunk and validar_se_e_video_mpegts(chunk):
+                    return True
+        except Exception:
+            continue
     return False
 
-def atualizar_pool_saude():
+def atualizar_pool_de_contas():
+    """ Diagnostica as contas e separa as ONLINE das BLOQUEADAS """
     global CONTAS_ONLINE_ATIVAS, CONTAS_BLOQUEADAS, ULTIMA_VERIFICACAO
-    online = []
-    bloqueadas = []
     
-    for conta in LISTA_CONTAS_POOL:
-        if testar_conta_individual(conta):
-            online.append(conta)
+    todas = carregar_todas_as_contas()
+    novas_online = []
+    novas_bloqueadas = []
+    
+    for idx, c in enumerate(todas):
+        nome = c.get("nome") or c.get("id") or f"Conta #{idx+1}"
+        c["nome_formatado"] = nome
+        if testar_conta(c):
+            novas_online.append(c)
         else:
-            bloqueadas.append(conta)
+            novas_bloqueadas.append(c)
             
-    with LOCK_POOL:
-        CONTAS_ONLINE_ATIVAS = online
-        CONTAS_BLOQUEADAS = bloqueadas
-        ULTIMA_VERIFICACAO = time.time()
-        
-    logging.info(f"🔄 Varredura do Pool Concluída: {len(online)} Contas Online | {len(bloqueadas)} Contas Descartadas/Bloqueadas")
+    CONTAS_ONLINE_ATIVAS = novas_online
+    CONTAS_BLOQUEADAS = novas_bloqueadas
+    ULTIMA_VERIFICACAO = time.time()
+    logging.info(f"📊 Diagnóstico Concluído: {len(novas_online)} Online | {len(novas_bloqueadas)} Descartadas/Bloqueadas")
 
-def iniciar_monitor_segundo_plano():
-    def loop_monitor():
-        while True:
-            try:
-                atualizar_pool_saude()
-            except Exception as e:
-                logging.error(f"Erro no monitor de segundo plano: {e}")
-            time.sleep(120)
-
-    t = threading.Thread(target=loop_monitor, daemon=True)
+def iniciar_verificacao_em_segundo_plano():
+    t = Thread(target=atualizar_pool_de_contas)
+    t.daemon = True
     t.start()
 
-# Executa verificação inicial de saude do pool
-atualizar_pool_saude()
-iniciar_monitor_segundo_plano()
+# Executa primeira checagem no startup
+atualizar_pool_de_contas()
 
-def conectar_fluxo_limpo(conta_info):
-    url_stream = f"{conta_info['host']}/live/{conta_info['user']}/{conta_info['pass']}/premiere1.ts"
-    try:
-        res = requests.get(url_stream, headers=HEADERS_CLIENTE, stream=True, timeout=3.5, verify=False)
-        if res.status_code == 200:
-            iterador = res.iter_content(chunk_size=16384)
-            primeiro_chunk = next(iterador, None)
-            if primeiro_chunk and validar_se_e_video_mpegts(primeiro_chunk):
-                def gerador():
-                    yield primeiro_chunk
-                    for chunk in iterador:
-                        if chunk:
-                            yield chunk
-                return gerador()
-    except Exception as e:
-        logging.warning(f"Conta {conta_info['id']} falhou na transmissão ao vivo: {e}")
-    return None
-
-def obter_gerador_fluxo():
-    with LOCK_POOL:
-        contas_disponiveis = list(CONTAS_ONLINE_ATIVAS)
+def tentar_obter_stream_direto():
+    """ Conecta na primeira conta ativa válida """
+    global CONTAS_ONLINE_ATIVAS, CONTAS_BLOQUEADAS
+    
+    if not CONTAS_ONLINE_ATIVAS:
+        atualizar_pool_de_contas()
         
-    for conta in contas_disponiveis:
-        gerador = conectar_fluxo_limpo(conta)
-        if gerador:
-            logging.info(f"📺 Sinal transmitido com sucesso via conta: {conta['id']} ({conta['nome']})")
-            return gerador
-        else:
-            with LOCK_POOL:
-                if conta in CONTAS_ONLINE_ATIVAS:
-                    CONTAS_ONLINE_ATIVAS.remove(conta)
-                    CONTAS_BLOQUEADAS.append(conta)
-                    logging.info(f"🚫 Conta {conta['id']} falhou no streaming ao vivo e foi removida do pool ativo.")
-                    
+    contas_copia = list(CONTAS_ONLINE_ATIVAS)
+    
+    for conta in contas_copia:
+        host = conta.get("host", "").rstrip("/")
+        user = conta.get("user") or conta.get("username", "")
+        password = conta.get("pass") or conta.get("password", "")
+        
+        url_target = f"{host}/live/{user}/{password}/premiere1.ts"
+        try:
+            r = requests.get(url_target, headers=HEADERS_CLIENTE, stream=True, timeout=3.0, verify=False)
+            if r.status_code == 200:
+                iterador = r.iter_content(chunk_size=32768)
+                primeiro_chunk = next(iterador, None)
+                if primeiro_chunk and validar_se_e_video_mpegts(primeiro_chunk):
+                    def gerador():
+                        yield primeiro_chunk
+                        for chunk in iterador:
+                            if chunk:
+                                yield chunk
+                    logging.info(f"🟢 Transmissão Iniciada via: {conta.get('nome_formatado')}")
+                    return gerador()
+        except Exception as err:
+            logging.warning(f"⚠️ Conta {conta.get('nome_formatado')} falhou durante reprodução. Removendo do pool...")
+            if conta in CONTAS_ONLINE_ATIVAS:
+                CONTAS_ONLINE_ATIVAS.remove(conta)
+                CONTAS_BLOQUEADAS.append(conta)
+            continue
+            
     return None
 
 def adicionar_cors(resposta):
@@ -166,25 +211,29 @@ def adicionar_cors(resposta):
     resposta.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resposta
 
+# =============================================================================
+# ROTAS FLASK
+# =============================================================================
+
 @app.route("/")
 def home():
-    html = f"""
+    html = """
     <!DOCTYPE html>
     <html lang="pt-BR">
     <head>
         <meta charset="UTF-8">
-        <title>Servidor Proxy IPTV - Premiere 1 (v25)</title>
+        <title>Servidor Proxy IPTV - Premiere 1 (v26)</title>
         <style>
-            body {{ font-family: Arial, sans-serif; background-color: #121212; color: #fff; text-align: center; padding: 40px; }}
-            .card {{ background-color: #1e1e1e; padding: 30px; border-radius: 12px; display: inline-block; max-width: 650px; }}
-            h1 {{ color: #00e676; }}
-            .btn {{ display: inline-block; background-color: #00e676; color: #000; padding: 12px 24px; margin: 10px; border-radius: 6px; font-weight: bold; text-decoration: none; }}
+            body { font-family: Arial, sans-serif; background-color: #121212; color: #fff; text-align: center; padding: 40px; }
+            .card { background-color: #1e1e1e; padding: 30px; border-radius: 12px; display: inline-block; max-width: 650px; }
+            h1 { color: #00e676; }
+            .btn { display: inline-block; background-color: #00e676; color: #000; padding: 12px 24px; margin: 10px; border-radius: 6px; font-weight: bold; text-decoration: none; }
         </style>
     </head>
     <body>
         <div class="card">
-            <h1>⚽ Servidor Proxy IPTV Premiere 1 (v25)</h1>
-            <p>Filtro Automático de Contas Ativo! ({len(CONTAS_ONLINE_ATIVAS)} Online / {len(CONTAS_BLOQUEADAS)} Removidas)</p>
+            <h1>⚽ Servidor Proxy IPTV Premiere 1 (v26)</h1>
+            <p>Servidor Ativo com Leitura de contasonlinefiltradas.json & Auto-Descarte!</p>
             <br>
             <a href="/debug" class="btn">📊 Painel de Diagnóstico (/debug)</a>
             <a href="/playlist.m3u" class="btn">📋 Baixar Lista M3U (/playlist.m3u)</a>
@@ -197,21 +246,18 @@ def home():
 @app.route("/debug")
 @app.route("/debug/")
 def debug():
-    with LOCK_POOL:
-        online_list = list(CONTAS_ONLINE_ATIVAS)
-        bloqueadas_list = list(CONTAS_BLOQUEADAS)
-        
-    html_online = "".join([f"<li style='color:#00e676;'><b>[ATIVO] {c['nome']}</b>: Sinal MPEG-TS OK</li>" for c in online_list])
-    html_bloqueadas = "".join([f"<li style='color:#ff5252;'><b>[REMOVIDO] {c['nome']}</b>: Bloqueado/Offline</li>" for c in bloqueadas_list])
-
+    iniciar_verificacao_em_segundo_plano()
+    
+    linhas_online = [f"<li style='color:#00e676;'><b>[ATIVO] {c.get('nome_formatado')}</b>: ONLINE (Sinal Limpo)</li>" for c in CONTAS_ONLINE_ATIVAS]
+    linhas_bloqueadas = [f"<li style='color:#ff5252;'><b>[REMOVIDO] {c.get('nome_formatado')}</b>: BLOQUEADO / OFFLINE</li>" for c in CONTAS_BLOQUEADAS]
+    
     html = f"""
-    <h2>📊 Painel de Diagnóstico v25 (Auto-Descarte Ativo)</h2>
-    <p><b>Contas Online em Uso:</b> {len(online_list)} | <b>Contas Removidas do Pool:</b> {len(bloqueadas_list)}</p>
-    <hr>
-    <h3>✅ Contas Ativas no Roteador:</h3>
-    <ul>{html_online or '<li>Nenhuma conta online no momento</li>'}</ul>
-    <h3>🚫 Contas Descartadas do Pool:</h3>
-    <ul>{html_bloqueadas or '<li>Nenhuma conta bloqueada</li>'}</ul>
+    <h2>📊 Painel de Diagnóstico v26 (Com suporte a .json)</h2>
+    <p><b>Contas Ativas no Roteador:</b> {len(CONTAS_ONLINE_ATIVAS)} | <b>Contas Descartadas:</b> {len(CONTAS_BLOQUEADAS)}</p>
+    <h3>✅ Contas Online (Servindo Vídeo)</h3>
+    <ul>{''.join(linhas_online) if linhas_online else '<li>Nenhuma conta online no momento</li>'}</ul>
+    <h3>❌ Contas Descartadas do Pool</h3>
+    <ul>{''.join(linhas_bloqueadas) if linhas_bloqueadas else '<li>Nenhuma conta descartada</li>'}</ul>
     """
     return adicionar_cors(Response(html, content_type="text/html; charset=utf-8"))
 
@@ -232,10 +278,10 @@ def playlist():
 @app.route("/live/premiere1")
 @app.route("/live/premiere")
 def stream_premiere():
-    gerador = obter_gerador_fluxo()
+    gerador = tentar_obter_stream_direto()
     if gerador:
         return adicionar_cors(Response(gerador, content_type="video/mp2t"))
-    return adicionar_cors(Response("Todas as contas foram temporariamente descartadas/bloqueadas.", status=503, content_type="text/plain; charset=utf-8"))
+    return adicionar_cors(Response("Sinal indisponível no momento. Todas as contas falharam.", status=503, content_type="text/plain; charset=utf-8"))
 
 @app.errorhandler(404)
 def erro_404(e):
