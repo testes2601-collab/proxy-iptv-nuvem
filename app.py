@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
-SERVIDOR PROXY IPTV PREMIUM - VERSÃO 27 (Anti-Cloudflare TLS Impersonate & Auto-Descarte)
+SERVIDOR PROXY IPTV PREMIUM - VERSÃO 28 (Fix Streaming Contínuo & Session Persistence)
 ===============================================================================
-Recursos da versão v27:
-1. Anti-Cloudflare TLS Impersonation (curl_cffi): Simula o Chrome 124 real nas requisições,
-   impedindo que a Cloudflare detecte o fingerprint de script e derrube a conexão a cada 190KB.
-2. Leitura Dinâmica do `contasonlinefiltradas.json` com Fallback de Segurança.
-3. Descarte Automático e Isolamento de Contas Bloqueadas / Offline.
-4. Conexão Contínua e Ininterrupta para VLC, Smart TV, TiviMate e SS IPTV.
+Recursos da versão v28:
+1. Fix do Limite de 191KB: Mantém a Session do `curl_cffi` aberta durante todo o 
+   loop do gerador de stream, impedindo a interrupção prematura da conexão.
+2. Desativação do Buffer do NGINX (`X-Accel-Buffering: no`): Força o Render a 
+   transmitir os pacotes diretamente ao VLC sem represar os bytes.
+3. Mapeamento Total de Rotas: Adicionadas todas as variações de m3u8 e ts 
+   (/live/premiere1.m3u8, /live/premiere1.ts, etc.) corrigindo o Erro 404 no VLC.
+4. Auto-Descarte & Fallback: Leitura contínua do contasonlinefiltradas.json.
 ===============================================================================
 """
 
@@ -21,7 +23,6 @@ import urllib3
 from flask import Flask, Response, request
 from threading import Thread
 
-# Importa curl_cffi para contornar impressão digital TLS da Cloudflare
 try:
     from curl_cffi import requests as cffi_requests
     HAS_CURL_CFFI = True
@@ -29,7 +30,6 @@ except ImportError:
     import requests as cffi_requests
     HAS_CURL_CFFI = False
 
-# Desativa avisos de SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(
@@ -40,9 +40,6 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-# =============================================================================
-# FALLBACK DE CONTAS (CASO O JSON NÃO SEJA ENCONTRADO)
-# =============================================================================
 CONTAS_FALLBACK = [
     {
         "id": "meusrv_03",
@@ -84,30 +81,13 @@ HEADERS_CHROME = {
     "Connection": "keep-alive"
 }
 
-def requisitar_http(url, stream=True, timeout=4.0):
-    """ Realiza requisição usando impersonate Chrome 124 para enganar o WAF da Cloudflare """
+def criar_sessao_cffi():
     if HAS_CURL_CFFI:
-        return cffi_requests.get(
-            url,
-            headers=HEADERS_CHROME,
-            stream=stream,
-            timeout=timeout,
-            verify=False,
-            impersonate="chrome124"
-        )
-    else:
-        return cffi_requests.get(
-            url,
-            headers=HEADERS_CHROME,
-            stream=stream,
-            timeout=timeout,
-            verify=False
-        )
+        return cffi_requests.Session(impersonate="chrome124")
+    return cffi_requests.Session()
 
 def carregar_todas_as_contas():
-    """ Tenta carregar as contas do arquivo contasonlinefiltradas.json ou usa fallback """
     arquivos_json = ["contasonlinefiltradas.json", "stream_config.json", "canais.json"]
-    
     for arq in arquivos_json:
         if os.path.exists(arq):
             try:
@@ -121,12 +101,10 @@ def carregar_todas_as_contas():
                         return dados["contas"]
             except Exception as e:
                 logging.warning(f"Erro ao ler {arq}: {e}")
-                
     logging.info("ℹ️ Usando pool de contas interno (Fallback)")
     return CONTAS_FALLBACK
 
 def validar_se_e_video_mpegts(chunk_bytes):
-    """ Valida se o primeiro pacote é MPEG-TS válido (byte 0x47) """
     if not chunk_bytes or len(chunk_bytes) < 188:
         return False
     if chunk_bytes[0] != 0x47:
@@ -139,11 +117,9 @@ def validar_se_e_video_mpegts(chunk_bytes):
     return True
 
 def testar_conta(conta_info):
-    """ Valida individualmente uma conta utilizando simulação de Chrome 124 """
     host = conta_info.get("host", "").rstrip("/")
     user = conta_info.get("user") or conta_info.get("username", "")
     password = conta_info.get("pass") or conta_info.get("password", "")
-    
     if not host or not user or not password:
         return False
         
@@ -153,21 +129,23 @@ def testar_conta(conta_info):
         f"{host}/live/{user}/{password}/premiere.ts"
     ]
     
-    for url in urls:
-        try:
-            r = requisitar_http(url, stream=True, timeout=3.5)
-            if r.status_code == 200:
-                chunk = next(r.iter_content(chunk_size=16384), None)
-                if chunk and validar_se_e_video_mpegts(chunk):
-                    return True
-        except Exception:
-            continue
+    sessao = criar_sessao_cffi()
+    try:
+        for url in urls:
+            try:
+                r = sessao.get(url, headers=HEADERS_CHROME, stream=True, timeout=3.5, verify=False)
+                if r.status_code == 200:
+                    chunk = next(r.iter_content(chunk_size=16384), None)
+                    if chunk and validar_se_e_video_mpegts(chunk):
+                        return True
+            except Exception:
+                continue
+    finally:
+        sessao.close()
     return False
 
 def atualizar_pool_de_contas():
-    """ Diagnostica as contas e separa as ONLINE das BLOQUEADAS """
     global CONTAS_ONLINE_ATIVAS, CONTAS_BLOQUEADAS
-    
     todas = carregar_todas_as_contas()
     novas_online = []
     novas_bloqueadas = []
@@ -182,46 +160,49 @@ def atualizar_pool_de_contas():
             
     CONTAS_ONLINE_ATIVAS = novas_online
     CONTAS_BLOQUEADAS = novas_bloqueadas
-    logging.info(f"📊 Diagnóstico Concluído (curl_cffi Chrome 124): {len(novas_online)} Online | {len(novas_bloqueadas)} Descartadas/Bloqueadas")
+    logging.info(f"📊 Diagnóstico Concluído (Session Persistent Chrome 124): {len(novas_online)} Online | {len(novas_bloqueadas)} Descartadas/Bloqueadas")
 
 def iniciar_verificacao_em_segundo_plano():
     t = Thread(target=atualizar_pool_de_contas)
     t.daemon = True
     t.start()
 
-# Executa primeira checagem no startup
 atualizar_pool_de_contas()
 
 def tentar_obter_stream_direto():
-    """ Conecta na primeira conta ativa válida enviando TLS Chrome 124 de baixa latência """
     global CONTAS_ONLINE_ATIVAS, CONTAS_BLOQUEADAS
-    
     if not CONTAS_ONLINE_ATIVAS:
         atualizar_pool_de_contas()
         
     contas_copia = list(CONTAS_ONLINE_ATIVAS)
     
     for conta in contas_copia:
-        host = conta.get("host", "").rstrip("/")
-        user = conta.get("user") or conta.get("username", "")
-        password = conta.get("pass") or conta.get("password", "")
-        
-        url_target = f"{host}/live/{user}/{password}/premiere1.ts"
         try:
-            r = requisitar_http(url_target, stream=True, timeout=5.0)
+            sessao_teste = criar_sessao_cffi()
+            host = conta.get("host", "").rstrip("/")
+            user = conta.get("user") or conta.get("username", "")
+            password = conta.get("pass") or conta.get("password", "")
+            url_target = f"{host}/live/{user}/{password}/premiere1.ts"
+            
+            r = sessao_teste.get(url_target, headers=HEADERS_CHROME, stream=True, timeout=4.0, verify=False)
             if r.status_code == 200:
                 iterador = r.iter_content(chunk_size=32768)
                 primeiro_chunk = next(iterador, None)
                 if primeiro_chunk and validar_se_e_video_mpegts(primeiro_chunk):
-                    def gerador():
+                    def gerador_completo():
                         yield primeiro_chunk
                         for chunk in iterador:
                             if chunk:
                                 yield chunk
-                    logging.info(f"🟢 Transmissão Iniciada (Chrome 124 TLS) via: {conta.get('nome_formatado')}")
-                    return gerador()
+                        try:
+                            sessao_teste.close()
+                        except Exception:
+                            pass
+                    logging.info(f"🟢 Transmissão Contínua Iniciada via: {conta.get('nome_formatado')}")
+                    return gerador_completo()
+            sessao_teste.close()
         except Exception as err:
-            logging.warning(f"⚠️ Conta {conta.get('nome_formatado')} falhou durante reprodução: {err}. Removendo do pool...")
+            logging.warning(f"⚠️ Conta {conta.get('nome_formatado')} falhou ao conectar: {err}")
             if conta in CONTAS_ONLINE_ATIVAS:
                 CONTAS_ONLINE_ATIVAS.remove(conta)
                 CONTAS_BLOQUEADAS.append(conta)
@@ -234,11 +215,8 @@ def adicionar_cors(resposta):
     resposta.headers["Access-Control-Allow-Headers"] = "*"
     resposta.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS, HEAD"
     resposta.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resposta.headers["X-Accel-Buffering"] = "no"
     return resposta
-
-# =============================================================================
-# ROTAS FLASK
-# =============================================================================
 
 @app.route("/")
 def home():
@@ -247,7 +225,7 @@ def home():
     <html lang="pt-BR">
     <head>
         <meta charset="UTF-8">
-        <title>Servidor Proxy IPTV - Premiere 1 (v27 Anti-Cloudflare)</title>
+        <title>Servidor Proxy IPTV - Premiere 1 (v28 Session Streaming)</title>
         <style>
             body { font-family: Arial, sans-serif; background-color: #121212; color: #fff; text-align: center; padding: 40px; }
             .card { background-color: #1e1e1e; padding: 30px; border-radius: 12px; display: inline-block; max-width: 650px; }
@@ -257,8 +235,8 @@ def home():
     </head>
     <body>
         <div class="card">
-            <h1>⚽ Servidor Proxy IPTV Premiere 1 (v27 Anti-Cloudflare)</h1>
-            <p>Servidor Ativo com Impersonate Chrome 124 (curl_cffi) & Auto-Descarte!</p>
+            <h1>⚽ Servidor Proxy IPTV Premiere 1 (v28 Session Streaming)</h1>
+            <p>Servidor Ativo com Session Persistence (Sem Queda de 191KB) & Auto-Descarte!</p>
             <br>
             <a href="/debug" class="btn">📊 Painel de Diagnóstico (/debug)</a>
             <a href="/playlist.m3u" class="btn">📋 Baixar Lista M3U (/playlist.m3u)</a>
@@ -272,12 +250,11 @@ def home():
 @app.route("/debug/")
 def debug():
     iniciar_verificacao_em_segundo_plano()
-    
-    linhas_online = [f"<li style='color:#00e676;'><b>[ATIVO] {c.get('nome_formatado')}</b>: ONLINE (Sinal Limpo Chrome 124)</li>" for c in CONTAS_ONLINE_ATIVAS]
+    linhas_online = [f"<li style='color:#00e676;'><b>[ATIVO] {c.get('nome_formatado')}</b>: ONLINE (Sinal Limpo Session Chrome 124)</li>" for c in CONTAS_ONLINE_ATIVAS]
     linhas_bloqueadas = [f"<li style='color:#ff5252;'><b>[REMOVIDO] {c.get('nome_formatado')}</b>: BLOQUEADO / OFFLINE</li>" for c in CONTAS_BLOQUEADAS]
     
     html = f"""
-    <h2>📊 Painel de Diagnóstico v27 (Anti-Cloudflare Chrome 124)</h2>
+    <h2>📊 Painel de Diagnóstico v28 (Session Persistence)</h2>
     <p><b>Contas Ativas no Roteador:</b> {len(CONTAS_ONLINE_ATIVAS)} | <b>Contas Descartadas:</b> {len(CONTAS_BLOQUEADAS)}</p>
     <h3>✅ Contas Online (Servindo Vídeo)</h3>
     <ul>{''.join(linhas_online) if linhas_online else '<li>Nenhuma conta online no momento</li>'}</ul>
@@ -299,6 +276,8 @@ def playlist():
     return adicionar_cors(Response(m3u_txt, content_type="application/x-mpegURL"))
 
 @app.route("/live/premiere1.ts")
+@app.route("/live/premiere1.m3u8")
+@app.route("/live/premiere.ts")
 @app.route("/live/premiere.m3u8")
 @app.route("/live/premiere1")
 @app.route("/live/premiere")
