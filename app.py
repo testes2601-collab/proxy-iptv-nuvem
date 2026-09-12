@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
-SERVIDOR PROXY IPTV PREMIUM - VERSÃO 33 (Suporte Nativo HLS .m3u8 & MPEG-TS .ts)
+SERVIDOR PROXY IPTV PREMIUM - VERSÃO 35 (NATIVE HLS .m3u8 SEGMENT STREAMER)
 ===============================================================================
-Novidades da Versão 33:
-1. Preservação Estrita de URLs .m3u8 (sem forçar conversão para .ts).
-2. Validador de Fluxo HLS/MPEG-TS: Aceita tanto pacotes .ts (0x47) quanto listas HLS (#EXTM3U).
-3. Auto-Failover Transparente em Loop Infinito sem tela preta.
-4. Suporte aos endpoints /live/premiere1.m3u8 e /live/premiere1.ts.
+1. Suporte Nativo a .m3u8: Lê o manifesto .m3u8 da origem, extrai os segmentos .ts
+   e faz o download contínuo dos pedaços de vídeo real sem fechar a transmissão.
+2. Fallback Inteligente (.m3u8 + .ts): Se a URL em .m3u8 der HTTP 500 (ex: BitUrl),
+   tenta automaticamente a versão .ts equivalente.
+3. Zero Tela Preta / Loop Infinito: Mantém o player (VLC/Smart TV) sempre conectado.
 ===============================================================================
 """
 
 import os
-import json
+import re
 import time
+import json
 import logging
 import urllib3
+from urllib.parse import urljoin
 from flask import Flask, Response, request, stream_with_context
 
 try:
@@ -34,6 +36,29 @@ logging.basicConfig(
 )
 
 app = Flask(__name__)
+
+CONTAS_FALLBACK = [
+    {
+        "id": "play_biturl_36948",
+        "nome": "BitUrl - Premiere Opção 1 (ID 36948)",
+        "url_direta": "http://play.biturl.vip:80/live/81996133766/hdj2edcoqw/36948.m3u8"
+    },
+    {
+        "id": "play_biturl_40783",
+        "nome": "BitUrl - Premiere Opção 2 (ID 40783)",
+        "url_direta": "http://play.biturl.vip:80/live/81996133766/hdj2edcoqw/40783.m3u8"
+    },
+    {
+        "id": "49fftq_72265",
+        "nome": "49fftq - Premiere 1 (ID 72265)",
+        "url_direta": "http://49fftq.live:80/live/QwqUJ8eQ/Vpw3S3/72265.m3u8"
+    },
+    {
+        "id": "49fftq_72262",
+        "nome": "49fftq - Premiere 2 (ID 72262)",
+        "url_direta": "http://49fftq.live:80/live/QwqUJ8eQ/Vpw3S3/72262.m3u8"
+    }
+]
 
 HEADERS_CHROME = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -55,85 +80,103 @@ def carregar_configuracao():
                         return dados
             except Exception as e:
                 logging.warning(f"Erro ao ler {arq}: {e}")
-    return []
-
-def obter_url_canal(conta):
-    # Preserva rigorosamente a URL original fornecida (ex: .m3u8)
-    if "url_direta" in conta and conta["url_direta"]:
-        return conta["url_direta"]
-    host = conta.get("host", "").rstrip("/")
-    user = conta.get("user") or conta.get("username", "")
-    password = conta.get("pass") or conta.get("password", "")
-    stream_id = conta.get("stream_id", "premiere1")
-    return f"{host}/live/{user}/{password}/{stream_id}.m3u8"
+    return CONTAS_FALLBACK
 
 def criar_sessao():
     if HAS_CURL_CFFI:
         return cffi_requests.Session(impersonate="chrome124")
     return cffi_requests.Session()
 
-def validar_chunk(chunk):
-    if not chunk or len(chunk) < 10:
-        return False
-    amostra = chunk[:512].lower()
-    # Bloqueia HTML / Cloudflare / Erros de Acesso
-    if b"<html" in amostra or b"cloudflare" in amostra or b"access denied" in amostra or b"404 not found" in amostra:
-        return False
-    # Aceita byte de sincronização MPEG-TS (0x47) OU cabeçalho HLS M3U8 (#EXTM3U / #EXTINF) OU fluxo binário
-    if chunk[0] == 0x47 or b"#extm3u" in amostra or b"#extinf" in amostra or len(chunk) >= 188:
-        return True
-    return False
+def extrair_segmentos_m3u8(conteudo_texto, url_base):
+    segmentos = []
+    for linha in conteudo_texto.splitlines():
+        linha = linha.strip()
+        if linha and not linha.startswith("#"):
+            url_seg = urljoin(url_base, linha)
+            segmentos.append(url_seg)
+    return segmentos
 
-def gerador_de_stream_continuo():
+def gerador_hls_resiliente():
     contas = carregar_configuracao()
     if not contas:
-        logging.error("❌ Nenhuma conta disponível no stream_config.json")
         return
 
     idx_conta = 0
-    tentativas = 0
-    max_tentativas = len(contas) * 10
+    segmentos_vistos = set()
 
-    while tentativas < max_tentativas:
+    while True:
         conta = contas[idx_conta % len(contas)]
-        url_target = obter_url_canal(conta)
         nome_conta = conta.get("nome") or conta.get("id") or f"Conta #{idx_conta+1}"
+        url_m3u8 = conta.get("url_direta", "")
+        
+        if not url_m3u8:
+            host = conta.get("host", "").rstrip("/")
+            user = conta.get("user") or conta.get("username", "")
+            password = conta.get("pass") or conta.get("password", "")
+            stream_id = conta.get("stream_id", "premiere1")
+            url_m3u8 = f"{host}/live/{user}/{password}/{stream_id}.m3u8"
 
-        logging.info(f"📡 Abrindo fluxo .m3u8 via: {nome_conta} -> {url_target}")
+        logging.info(f"📡 Processando manifesto HLS (.m3u8) via: {nome_conta} -> {url_m3u8}")
         
         session = criar_sessao()
-        try:
-            r = session.get(url_target, headers=HEADERS_CHROME, stream=True, timeout=6.0, verify=False)
-            if r.status_code == 200:
-                iterador = r.iter_content(chunk_size=32768)
-                primeiro_chunk = next(iterador, None)
+        sucesso_conta = False
 
-                if primeiro_chunk and validar_chunk(primeiro_chunk):
-                    logging.info(f"🟢 Transmissão HLS/M3U8 Ativa via: {nome_conta}")
-                    yield primeiro_chunk
-                    
-                    for chunk in iterador:
+        try:
+            # 1. Tenta buscar o manifesto .m3u8
+            r = session.get(url_m3u8, headers=HEADERS_CHROME, timeout=5.0, verify=False)
+            
+            # Fallback se der 500 ou 404 no .m3u8: tenta o fluxo direto em .ts
+            if r.status_code != 200:
+                logging.warning(f"🔴 HTTP {r.status_code} no .m3u8 de {nome_conta}. Tentando fallback para .ts...")
+                url_ts = url_m3u8.replace(".m3u8", ".ts")
+                r_ts = session.get(url_ts, headers=HEADERS_CHROME, stream=True, timeout=6.0, verify=False)
+                if r_ts.status_code == 200:
+                    for chunk in r_ts.iter_content(chunk_size=32768):
                         if chunk:
                             yield chunk
-                        else:
-                            break
-                    
-                    logging.warning(f"⚠️ Fluxo encerrado na conta {nome_conta}. Efetuando failover transparente...")
+                            sucesso_conta = True
             else:
-                logging.warning(f"🔴 Erro HTTP {r.status_code} na conta {nome_conta}")
+                texto_m3u8 = r.text
+                # Se for uma playlist master ou de mídia .m3u8 válida
+                if "#EXTM3U" in texto_m3u8:
+                    segmentos = extrair_segmentos_m3u8(texto_m3u8, url_m3u8)
+                    logging.info(f"🟢 {len(segmentos)} segmentos de vídeo localizados em {nome_conta}")
+                    
+                    for url_seg in segmentos:
+                        if url_seg in segmentos_vistos:
+                            continue
+                        
+                        segmentos_vistos.add(url_seg)
+                        if len(segmentos_vistos) > 500:
+                            segmentos_vistos.clear()
+
+                        r_seg = session.get(url_seg, headers=HEADERS_CHROME, stream=True, timeout=5.0, verify=False)
+                        if r_seg.status_code == 200:
+                            for chunk in r_seg.iter_content(chunk_size=32768):
+                                if chunk:
+                                    yield chunk
+                                    sucesso_conta = True
+                else:
+                    # Se não tiver #EXTM3U, pode ser um stream MPEG-TS direto mascarado
+                    if len(r.content) > 188 and r.content[0] == 0x47:
+                        yield r.content
+                        sucesso_conta = True
+
         except Exception as e:
-            logging.warning(f"⚠️ Falha no fluxo da conta {nome_conta}: {e}")
+            logging.warning(f"⚠️ Erro ao processar HLS em {nome_conta}: {e}")
         finally:
             try:
                 session.close()
             except Exception:
                 pass
 
-        idx_conta += 1
-        tentativas += 1
-        time.sleep(0.1)
+        if not sucesso_conta:
+            logging.warning(f"⚠️ Falha de transmissão em {nome_conta}. Alternando para próxima conta...")
 
-def adicionar_cabecalhos_streaming(resposta, content_type="application/x-mpegURL"):
+        idx_conta += 1
+        time.sleep(0.2)
+
+def adicionar_cabecalhos_streaming(resposta):
     resposta.headers["Access-Control-Allow-Origin"] = "*"
     resposta.headers["Access-Control-Allow-Headers"] = "*"
     resposta.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS, HEAD"
@@ -141,36 +184,33 @@ def adicionar_cabecalhos_streaming(resposta, content_type="application/x-mpegURL
     resposta.headers["Pragma"] = "no-cache"
     resposta.headers["Expires"] = "0"
     resposta.headers["X-Accel-Buffering"] = "no"
-    resposta.headers["Content-Type"] = content_type
     return resposta
 
 @app.route("/")
 def home():
-    return adicionar_cabecalhos_streaming(Response("Servidor Proxy IPTV Premiere 1 (v33 M3U8 Native Stream)", content_type="text/plain; charset=utf-8"), "text/plain; charset=utf-8")
+    return adicionar_cabecalhos_streaming(Response("Servidor Proxy IPTV Premiere 1 (v35 Native HLS m3u8 Streamer)", content_type="text/plain; charset=utf-8"))
 
 @app.route("/debug")
 def debug():
     contas = carregar_configuracao()
-    return adicionar_cabecalhos_streaming(Response(f"Contas Ativas no Pool: {len(contas)}", content_type="text/plain; charset=utf-8"), "text/plain; charset=utf-8")
+    return adicionar_cabecalhos_streaming(Response(f"Contas Ativas no Pool: {len(contas)}", content_type="text/plain; charset=utf-8"))
 
 @app.route("/playlist.m3u")
 @app.route("/playlist.m3u8")
 def playlist():
     host_base = request.host_url.rstrip("/")
     m3u = f'#EXTM3U\n#EXTINF:-1 tvg-id="Premiere1.br" tvg-name="Premiere 1 FHD",Premiere 1 FHD\n{host_base}/live/premiere1.m3u8\n'
-    return adicionar_cabecalhos_streaming(Response(m3u, content_type="application/x-mpegURL"), "application/x-mpegURL")
+    return adicionar_cabecalhos_streaming(Response(m3u, content_type="application/x-mpegURL"))
 
 @app.route("/live/premiere1.m3u8")
 @app.route("/live/premiere.m3u8")
 @app.route("/live/premiere1.ts")
 @app.route("/live/premiere.ts")
 def stream():
-    ext = request.path.split(".")[-1]
-    ctype = "application/x-mpegURL" if ext == "m3u8" else "video/mp2t"
     return adicionar_cabecalhos_streaming(Response(
-        stream_with_context(gerador_de_stream_continuo()),
-        content_type=ctype
-    ), ctype)
+        stream_with_context(gerador_hls_resiliente()),
+        content_type="video/mp2t"
+    ))
 
 if __name__ == "__main__":
     porta = int(os.environ.get("PORT", 5000))
