@@ -1,5 +1,5 @@
 Flask 
 gunicorn 
-curl\_cffi 
+curl_cffi 
 requests 
 urllib3
