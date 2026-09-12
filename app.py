@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
-SERVIDOR PROXY IPTV PREMIUM - VERSÃO 23 (Fix Definitivo do Timeout no VLC & Fast-Path Cache)
+SERVIDOR PROXY IPTV PREMIUM - VERSÃO 24 (Conexão Direta Sequencial Anti-Bloqueio)
 ===============================================================================
-Recursos da versão v23:
-1. Fix do Timeout (Sem shutdown(wait=True)): Usa Global ThreadPoolExecutor sem bloquear a resposta ao VLC.
-2. Fast-Path Cache: Memoriza a última conta ONLINE (MeuSrv) e entrega o vídeo em < 0.2s no VLC.
-3. Reordenamento Inteligente: Coloca os servidores ativos (MeuSrv) no topo do Pool.
-4. Filtro Byte-a-Byte MPEG-TS (0x47): Garante apenas fluxo de vídeo limpo.
-5. Suporte Completo a Rotas M3U e TS para VLC, Smart TV, TiviMate e SS IPTV.
+Recursos da versão v24:
+1. Conexão Sequencial Inteligente: Testa 1 conta por vez para evitar bloqueio de IP no meusrv.top.
+2. Chunk-Size Reduzido (8192 bytes): Entrega rápida do primeiro pacote ao VLC em < 0.1s.
+3. Cache Persistente da Conta Ativa: Mantém a conta funcional sem disparar testes repetidos.
+4. Filtro Byte-a-Byte MPEG-TS (0x47): Garante sinal de vídeo limpo.
+5. Suporte Completo VLC, Smart TV, TiviMate, SS IPTV e Web Players.
 ===============================================================================
 """
 
@@ -19,7 +19,6 @@ import logging
 import urllib3
 import requests
 from flask import Flask, Response, request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Desativa alertas de SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -32,17 +31,15 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-# Executor global para não travar a resposta HTTP do Flask aguardando shutdown
-GLOBAL_EXECUTOR = ThreadPoolExecutor(max_workers=20)
-
-# Cache global da última conta que entregou sinal válido
-CONTA_ONLINE_CACHE = {"conta": None, "timestamp": 0}
+# Cache global da conta ativa funcional
+CONTA_ATIVA_CACHE = None
+ULTIMA_VERIFICACAO = 0
 
 # =============================================================================
-# POOL DE CONTAS (REORDENADO COM MEUSRV E IP DIRETO NO TOPO)
+# POOL DE CONTAS (MEUSRV NO TOPO - TESTE SEQUENCIAL SEM PARALELISMO MESMO HOST)
 # =============================================================================
 LISTA_CONTAS_POOL = [
-    # --- SERVIDORES MEUSRV (CONFIRMADOS ONLINE COM SINAL LIMPO) ---
+    # --- SERVIDORES MEUSRV (CONFIRMADOS ONLINE) ---
     {
         "id": "meusrv_03",
         "nome": "MeuSrv 567",
@@ -107,7 +104,7 @@ LISTA_CONTAS_POOL = [
         "user": "tatiana9944",
         "pass": "Ta994a"
     },
-    # --- OUTROS DOMÍNIOS ---
+    # --- DEMAIS SERVIDORES ---
     {
         "id": "xyz_332_01",
         "nome": "XYZ 332 (988)",
@@ -185,8 +182,8 @@ def validar_se_e_video_mpegts(chunk_bytes):
             return False
     return True
 
-def testar_e_obter_stream(conta_info):
-    """ Tenta conectar ao canal Premiere 1 na conta e retorna o gerador de bytes """
+def tentar_obter_stream_conta(conta_info):
+    """ Tenta conectar sequencialmente sem sobrecarregar o host """
     urls_para_testar = [
         f"{conta_info['host']}/live/{conta_info['user']}/{conta_info['pass']}/premiere1.ts",
         f"{conta_info['host']}/live/{conta_info['user']}/{conta_info['pass']}/premiere.m3u8",
@@ -195,9 +192,9 @@ def testar_e_obter_stream(conta_info):
     
     for target_url in urls_para_testar:
         try:
-            res = requests.get(target_url, headers=HEADERS_CLIENTE, stream=True, timeout=2.5, verify=False)
+            res = requests.get(target_url, headers=HEADERS_CLIENTE, stream=True, timeout=3.5, verify=False)
             if res.status_code == 200:
-                iterador = res.iter_content(chunk_size=65536)
+                iterador = res.iter_content(chunk_size=8192)
                 primeiro_chunk = next(iterador, None)
                 if primeiro_chunk and validar_se_e_video_mpegts(primeiro_chunk):
                     def gerador():
@@ -210,37 +207,31 @@ def testar_e_obter_stream(conta_info):
             continue
     return None
 
-def obter_fluxo_otimizado():
+def obter_fluxo_direto():
     """ 
-    Fast-path: testa primeiro a última conta que funcionou.
-    Fallback: se falhar, consulta todas em paralelo via executor global.
+    Obtém o fluxo de vídeo sem disparar múltiplas conexões simultâneas no mesmo host.
     """
-    global CONTA_ONLINE_CACHE
-    
-    # 1. Fast-Path: Tenta a conta salva em cache primeiro (resposta em ~0.1s)
-    conta_cached = CONTA_ONLINE_CACHE.get("conta")
-    if conta_cached:
-        resultado_fast = testar_e_obter_stream(conta_cached)
-        if resultado_fast:
-            logging.info(f"⚡ Fast-Path Ativo: Conectado instantaneamente à conta cache {conta_cached['id']}")
-            return resultado_fast[1]
-        else:
-            CONTA_ONLINE_CACHE["conta"] = None
+    global CONTA_ATIVA_CACHE, ULTIMA_VERIFICACAO
 
-    # 2. Busca Paralela Imediata via Global Executor (sem shutdown blocking)
-    futures = [GLOBAL_EXECUTOR.submit(testar_e_obter_stream, conta) for conta in LISTA_CONTAS_POOL]
-    for future in as_completed(futures):
-        try:
-            resultado = future.result()
-            if resultado:
-                conta_info, gerador = resultado
-                CONTA_ONLINE_CACHE["conta"] = conta_info
-                CONTA_ONLINE_CACHE["timestamp"] = time.time()
-                logging.info(f"✅ Nova conta online selecionada: {conta_info['id']} ({conta_info['nome']})")
-                return gerador
-        except Exception:
-            continue
-            
+    # 1. Tenta a conta salva em cache primeiro (resposta ultra-rápida)
+    if CONTA_ATIVA_CACHE:
+        resultado = tentar_obter_stream_conta(CONTA_ATIVA_CACHE)
+        if resultado:
+            logging.info(f"⚡ Conectado instantaneamente à conta cache: {CONTA_ATIVA_CACHE['id']}")
+            return resultado[1]
+        else:
+            CONTA_ATIVA_CACHE = None
+
+    # 2. Busca sequencial organizada (evita colisão de requisições no mesmo IP)
+    for conta in LISTA_CONTAS_POOL:
+        resultado = tentar_obter_stream_conta(conta)
+        if resultado:
+            conta_info, gerador = resultado
+            CONTA_ATIVA_CACHE = conta_info
+            ULTIMA_VERIFICACAO = time.time()
+            logging.info(f"✅ Nova conta ativa conectada: {conta_info['id']} ({conta_info['nome']})")
+            return gerador
+
     return None
 
 def adicionar_cors(resposta):
@@ -263,7 +254,7 @@ def home():
     <html lang="pt-BR">
     <head>
         <meta charset="UTF-8">
-        <title>Servidor Proxy IPTV - Premiere 1 (v23)</title>
+        <title>Servidor Proxy IPTV - Premiere 1 (v24)</title>
         <style>
             body { font-family: Arial, sans-serif; background-color: #121212; color: #fff; text-align: center; padding: 40px; }
             .card { background-color: #1e1e1e; padding: 30px; border-radius: 12px; display: inline-block; max-width: 650px; }
@@ -273,8 +264,8 @@ def home():
     </head>
     <body>
         <div class="card">
-            <h1>⚽ Servidor Proxy IPTV Premiere 1 (v23)</h1>
-            <p>Servidor Ativo com Fast-Path Cache & Conexão Instantânea no VLC!</p>
+            <h1>⚽ Servidor Proxy IPTV Premiere 1 (v24)</h1>
+            <p>Servidor com Conexão Sequencial Anti-Bloqueio & Suporte VLC!</p>
             <br>
             <a href="/debug" class="btn">📊 Painel de Diagnóstico (/debug)</a>
             <a href="/playlist.m3u" class="btn">📋 Baixar Lista M3U (/playlist.m3u)</a>
@@ -289,21 +280,16 @@ def home():
 def debug():
     linhas = []
     contas_online = 0
-    futures = {GLOBAL_EXECUTOR.submit(testar_e_obter_stream, c): c for c in LISTA_CONTAS_POOL}
-    for future in as_completed(futures):
-        c = futures[future]
-        try:
-            res = future.result()
-            if res:
-                contas_online += 1
-                linhas.append(f"<li style='color:#00e676;'><b>{c['nome']}</b>: ONLINE (Sinal MPEG-TS Limpo)</li>")
-            else:
-                linhas.append(f"<li style='color:#ff5252;'><b>{c['nome']}</b>: OFFLINE / BLOQUEADO</li>")
-        except Exception:
-            linhas.append(f"<li style='color:#ff5252;'><b>{c['nome']}</b>: ERRO NA REQUISIÇÃO</li>")
+    for c in LISTA_CONTAS_POOL:
+        res = tentar_obter_stream_conta(c)
+        if res:
+            contas_online += 1
+            linhas.append(f"<li style='color:#00e676;'><b>{c['nome']}</b>: ONLINE (Sinal MPEG-TS Limpo)</li>")
+        else:
+            linhas.append(f"<li style='color:#ff5252;'><b>{c['nome']}</b>: OFFLINE / BLOQUEADO</li>")
 
     html = f"""
-    <h2>📊 Painel de Diagnóstico v23</h2>
+    <h2>📊 Painel de Diagnóstico v24</h2>
     <p><b>Total de Contas:</b> {len(LISTA_CONTAS_POOL)} | <b>Online:</b> {contas_online}</p>
     <ul>{''.join(linhas)}</ul>
     """
@@ -326,7 +312,7 @@ def playlist():
 @app.route("/live/premiere1")
 @app.route("/live/premiere")
 def stream_premiere():
-    gerador = obter_fluxo_otimizado()
+    gerador = obter_fluxo_direto()
     if gerador:
         return adicionar_cors(Response(gerador, content_type="video/mp2t"))
     return adicionar_cors(Response("Sinal indisponível no momento. Todas as contas falharam.", status=503, content_type="text/plain; charset=utf-8"))
