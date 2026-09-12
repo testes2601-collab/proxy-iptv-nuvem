@@ -1,94 +1,42 @@
 {
-    "atualizado_em": "2026-09-12 00:16:50",
-    "total_online": 8,
+    "atualizado_em": "2026-09-12 05:28:15",
+    "total_online": 4,
     "contas": [
         {
-            "status": "ONLINE",
-            "id": "meusrv_5",
-            "host": "http://meusrv.top:80",
-            "user": "HUuCFJ",
-            "pass": "Sv6z3x",
-            "expira": "18/03/2027",
-            "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)",
-            "stream_id": "premiere1",
-            "url_direta": "http://meusrv.top:80/live/HUuCFJ/Sv6z3x/premiere1.ts"
+            "id": "biturl_36948",
+            "nome": "BitUrl - Premiere 1 (ID 36948.m3u8)",
+            "host": "http://play.biturl.vip:80",
+            "user": "81996133766",
+            "pass": "hdj2edcoqw",
+            "stream_id": "36948",
+            "url_direta": "http://play.biturl.vip:80/live/81996133766/hdj2edcoqw/36948.m3u8"
         },
         {
-            "status": "ONLINE",
-            "id": "meusrv_7",
-            "host": "http://meusrv.top:80",
-            "user": "171769357",
-            "pass": "782164797",
-            "expira": "14/10/2026",
-            "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)",
-            "stream_id": "premiere1",
-            "url_direta": "http://meusrv.top:80/live/171769357/782164797/premiere1.ts"
+            "id": "biturl_40783",
+            "nome": "BitUrl - Premiere 2 (ID 40783.m3u8)",
+            "host": "http://play.biturl.vip:80",
+            "user": "81996133766",
+            "pass": "hdj2edcoqw",
+            "stream_id": "40783",
+            "url_direta": "http://play.biturl.vip:80/live/81996133766/hdj2edcoqw/40783.m3u8"
         },
         {
-            "status": "ONLINE",
-            "id": "meusrv_4",
-            "host": "http://meusrv.top:80",
-            "user": "461572994",
-            "pass": "644621735",
-            "expira": "15/04/2027",
-            "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)",
-            "stream_id": "premiere1",
-            "url_direta": "http://meusrv.top:80/live/461572994/644621735/premiere1.ts"
+            "id": "fftq_72265",
+            "nome": "49fftq - Premiere 1 (ID 72265.m3u8)",
+            "host": "http://49fftq.live:80",
+            "user": "QwqUJ8eQ",
+            "pass": "Vpw3S3",
+            "stream_id": "72265",
+            "url_direta": "http://49fftq.live:80/live/QwqUJ8eQ/Vpw3S3/72265.m3u8"
         },
         {
-            "status": "ONLINE",
-            "id": "meusrv_6",
-            "host": "http://meusrv.top:80",
-            "user": "74468590",
-            "pass": "448420959",
-            "expira": "13/03/2027",
-            "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)",
-            "stream_id": "premiere1",
-            "url_direta": "http://meusrv.top:80/live/74468590/448420959/premiere1.ts"
-        },
-        {
-            "status": "ONLINE",
-            "id": "meusrv_8",
-            "host": "http://meusrv.top:80",
-            "user": "361811331",
-            "pass": "252766314",
-            "expira": "14/10/2026",
-            "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)",
-            "stream_id": "premiere1",
-            "url_direta": "http://meusrv.top:80/live/361811331/252766314/premiere1.ts"
-        },
-        {
-            "status": "ONLINE",
-            "id": "meusrv_1",
-            "host": "http://meusrv.top:80",
-            "user": "567689135",
-            "pass": "965722522",
-            "expira": "08/05/2027",
-            "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)",
-            "stream_id": "premiere1",
-            "url_direta": "http://meusrv.top:80/live/567689135/965722522/premiere1.ts"
-        },
-        {
-            "status": "ONLINE",
-            "id": "meusrv_3",
-            "host": "http://meusrv.top:80",
-            "user": "395688158",
-            "pass": "233953775",
-            "expira": "27/04/2027",
-            "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)",
-            "stream_id": "premiere1",
-            "url_direta": "http://meusrv.top:80/live/395688158/233953775/premiere1.ts"
-        },
-        {
-            "status": "ONLINE",
-            "id": "meusrv_2",
-            "host": "http://meusrv.top:80",
-            "user": "955823677",
-            "pass": "798597634",
-            "expira": "27/04/2027",
-            "mensagem": "ONLINE (HTTP 200 - Sinal MPEG-TS Validado)",
-            "stream_id": "premiere1",
-            "url_direta": "http://meusrv.top:80/live/955823677/798597634/premiere1.ts"
+            "id": "fftq_72262",
+            "nome": "49fftq - Premiere 2 (ID 72262.m3u8)",
+            "host": "http://49fftq.live:80",
+            "user": "QwqUJ8eQ",
+            "pass": "Vpw3S3",
+            "stream_id": "72262",
+            "url_direta": "http://49fftq.live:80/live/QwqUJ8eQ/Vpw3S3/72262.m3u8"
         }
     ]
 }
