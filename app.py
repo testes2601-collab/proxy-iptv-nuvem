@@ -1,23 +1,25 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
-SERVIDOR PROXY IPTV PREMIUM - VERSÃO 30 (Ultra-Rápido com Leitura de stream_config.json)
+SERVIDOR PROXY IPTV PREMIUM - VERSÃO 32 (Loop Infinito & Auto-Recuperação Anti-Tela Preta)
 ===============================================================================
-Recursos da versão v30:
-1. Leitura do `stream_config.json`: Consome diretamente os IDs numéricos reais pré-mapeados
-   pelo script local `gerar_config_ids.py`.
-2. Latência Zero: Sem perdas de tempo buscando playlists M3U ou testando contas mortas no Render.
-3. Anti-Cloudflare TLS (curl_cffi Chrome 124) + Suporte Multi-Rotas (/live/premiere1.ts, etc).
+Recursos da versão v32:
+1. Loop Infinito Permanente (`while True`): Nunca encerra a busca por sinal.
+2. Permanência em URL Estável: Enquanto a URL atual enviar vídeo válido (0x47),
+   o proxy PERMANECE NELA indefinidamente.
+3. Rotação Automática ao Detectar Travamento: Se o sinal ameaçar cair/travar/dar tela preta,
+   o proxy pula IMEDIATAMENTE para a próxima URL do pool.
+4. Ciclo Contínuo Completo: Quando percorre todas as URLs, volta automaticamente
+   para a primeira URL do topo e reinicia a busca sem fechar a conexão no VLC / TV.
 ===============================================================================
 """
 
 import os
-import time
 import json
+import time
 import logging
 import urllib3
-from flask import Flask, Response, request
-from threading import Thread
+from flask import Flask, Response, request, stream_with_context
 
 try:
     from curl_cffi import requests as cffi_requests
@@ -36,144 +38,171 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
+CONTAS_FALLBACK = [
+    {
+        "id": "play_biturl_36948",
+        "nome": "BitUrl - Premiere Opção 1",
+        "host": "http://play.biturl.vip:80",
+        "user": "81996133766",
+        "pass": "hdj2edcoqw",
+        "stream_id": "36948",
+        "url_direta": "http://play.biturl.vip:80/live/81996133766/hdj2edcoqw/36948.ts"
+    },
+    {
+        "id": "play_biturl_40783",
+        "nome": "BitUrl - Premiere Opção 2",
+        "host": "http://play.biturl.vip:80",
+        "user": "81996133766",
+        "pass": "hdj2edcoqw",
+        "stream_id": "40783",
+        "url_direta": "http://play.biturl.vip:80/live/81996133766/hdj2edcoqw/40783.ts"
+    }
+]
+
 HEADERS_CHROME = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "*/*",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
     "Connection": "keep-alive"
 }
 
-CONTAS_ONLINE = []
-CONTAS_BLOQUEADAS = []
-
-def requisitar_http(url, stream=True, timeout=5.0):
-    if HAS_CURL_CFFI:
-        return cffi_requests.get(
-            url,
-            headers=HEADERS_CHROME,
-            stream=stream,
-            timeout=timeout,
-            verify=False,
-            impersonate="chrome124"
-        )
-    else:
-        return cffi_requests.get(
-            url,
-            headers=HEADERS_CHROME,
-            stream=stream,
-            timeout=timeout,
-            verify=False
-        )
-
-def carregar_stream_config():
-    global CONTAS_ONLINE
-    arquivos = ["stream_config.json", "contasonlinefiltradas.json"]
+def carregar_configuracao():
+    arquivos = ["stream_config.json", "contasonlinefiltradas.json", "canais.json"]
     for arq in arquivos:
         if os.path.exists(arq):
             try:
                 with open(arq, "r", encoding="utf-8") as f:
                     dados = json.load(f)
-                    lista = dados.get("contas", dados) if isinstance(dados, dict) else dados
-                    if isinstance(lista, list) and len(lista) > 0:
-                        logging.info(f"📂 Configuração carregada com sucesso de '{arq}' ({len(lista)} contas)")
-                        CONTAS_ONLINE = lista
-                        return
+                    if isinstance(dados, dict) and "contas" in dados and len(dados["contas"]) > 0:
+                        return dados["contas"]
+                    elif isinstance(dados, list) and len(dados) > 0:
+                        return dados
             except Exception as e:
-                logging.warning(f"Erro ao carregar {arq}: {e}")
-    logging.warning("⚠️ Nenhum arquivo de configuração válido encontrado.")
+                logging.warning(f"Erro ao ler {arq}: {e}")
+    return CONTAS_FALLBACK
 
-carregar_stream_config()
+def obter_url_canal(conta):
+    if "url_direta" in conta and conta["url_direta"]:
+        return conta["url_direta"].replace(".m3u8", ".ts")
+    host = conta.get("host", "").rstrip("/")
+    user = conta.get("user") or conta.get("username", "")
+    password = conta.get("pass") or conta.get("password", "")
+    stream_id = conta.get("stream_id", "premiere1")
+    return f"{host}/live/{user}/{password}/{stream_id}.ts"
 
-def validar_mpegts(chunk):
-    if not chunk or len(chunk) < 188 or chunk[0] != 0x47:
+def criar_sessao():
+    if HAS_CURL_CFFI:
+        return cffi_requests.Session(impersonate="chrome124")
+    return cffi_requests.Session()
+
+def validar_chunk_mpegts(chunk):
+    """ Valida se o pacote recebido é MPEG-TS válido (0x47) e não HTML/Erro """
+    if not chunk or len(chunk) < 188:
+        return False
+    if chunk[0] != 0x47:
         return False
     amostra = chunk[:1024].lower()
-    return not any(t in amostra for t in [b"<html", b"<!doctype", b"cloudflare", b"access denied"])
+    termos_invalidos = [b"<html", b"<!doctype", b"cloudflare", b"restricted", b"access denied", b"error 1020"]
+    for termo in termos_invalidos:
+        if termo in amostra:
+            return False
+    return True
 
-def obter_gerador_stream():
-    global CONTAS_ONLINE, CONTAS_BLOQUEADAS
-    
-    if not CONTAS_ONLINE:
-        carregar_stream_config()
-        
-    copia_contas = list(CONTAS_ONLINE)
-    
-    for conta in copia_contas:
-        host = conta.get("host", "").rstrip("/")
-        user = conta.get("user") or conta.get("username", "")
-        password = conta.get("pass") or conta.get("password", "")
-        stream_id = conta.get("stream_id", "premiere1")
-        
-        url_target = conta.get("url_direta") or f"{host}/live/{user}/{password}/{stream_id}.ts"
-        
+def gerador_loop_infinito_anti_tela_preta():
+    """
+    GERADOR EM LOOP INFINITO:
+    1. Permanece na mesma URL ENQUANTO o sinal estiver estável e enviando chunks de vídeo.
+    2. Se a URL ameaçar travar / dar tela preta (falha de rede, timeout, drop da Cloudflare),
+       avança imediatamente para a próxima URL.
+    3. Percorre todas as URLs do pool e, ao chegar no fim, VOLTA PARA A PRIMEIRA (ciclo contínuo).
+    """
+    idx_conta = 0
+
+    while True:
+        contas = carregar_configuracao()
+        if not contas:
+            time.sleep(1)
+            continue
+
+        # Garante índice dentro do limite da lista atualizada
+        idx_conta = idx_conta % len(contas)
+        conta = contas[idx_conta]
+        url_target = obter_url_canal(conta)
+        nome_conta = conta.get("nome") or conta.get("id") or f"Opção #{idx_conta+1}"
+
+        logging.info(f"📡 Conectando ao sinal -> [{idx_conta+1}/{len(contas)}] {nome_conta}")
+
+        session = criar_sessao()
+
         try:
-            r = requisitar_http(url_target, stream=True, timeout=4.0)
+            r = session.get(url_target, headers=HEADERS_CHROME, stream=True, timeout=6.0, verify=False)
             if r.status_code == 200:
                 iterador = r.iter_content(chunk_size=32768)
                 primeiro_chunk = next(iterador, None)
-                if primeiro_chunk and validar_mpegts(primeiro_chunk):
-                    def gerador():
-                        yield primeiro_chunk
-                        for chunk in iterador:
-                            if chunk:
-                                yield chunk
-                    logging.info(f"🟢 Transmissão Iniciada via: {conta.get('nome', user)}")
-                    return gerador()
-        except Exception as err:
-            logging.warning(f"⚠️ Conta {conta.get('nome', user)} falhou: {err}. Descartando...")
-            if conta in CONTAS_ONLINE:
-                CONTAS_ONLINE.remove(conta)
-                CONTAS_BLOQUEADAS.append(conta)
-            continue
-            
-    return None
 
-def adicionar_cors(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Headers"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS, HEAD"
-    resp.headers["X-Accel-Buffering"] = "no"
-    return resp
+                if primeiro_chunk and validar_chunk_mpegts(primeiro_chunk):
+                    logging.info(f"🟢 Transmissão ESTÁVEL iniciada via: {nome_conta}")
+                    yield primeiro_chunk
+
+                    # PERMANECE NESTA URL ENQUANTO ESTIVER ENVIANDO CHUNKS VÁLIDOS
+                    for chunk in iterador:
+                        if chunk:
+                            yield chunk
+                        else:
+                            logging.warning(f"⚠️ Fluxo de vídeo interrompido em {nome_conta}. Ameaçando tela preta!")
+                            break
+                else:
+                    logging.warning(f"⚠️ {nome_conta} retornou dados inválidos/erro (não é MPEG-TS 0x47).")
+            else:
+                logging.warning(f"🔴 Resposta HTTP {r.status_code} recebida de {nome_conta}.")
+        except Exception as err:
+            logging.warning(f"⚠️ Falha de leitura/conexão em {nome_conta}: {err}")
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+        # Se o sinal caiu ou ameaçou travar, avança para a próxima URL no loop infinito
+        idx_conta = (idx_conta + 1) % len(contas)
+        logging.info(f"🔄 Alternando para a próxima URL no loop -> Índice [{idx_conta+1}/{len(contas)}]")
+        time.sleep(0.05)
+
+def adicionar_cabecalhos_streaming(resposta):
+    resposta.headers["Access-Control-Allow-Origin"] = "*"
+    resposta.headers["Access-Control-Allow-Headers"] = "*"
+    resposta.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS, HEAD"
+    resposta.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, private"
+    resposta.headers["Pragma"] = "no-cache"
+    resposta.headers["Expires"] = "0"
+    resposta.headers["X-Accel-Buffering"] = "no"
+    return resposta
 
 @app.route("/")
 def home():
-    return adicionar_cors(Response("Servidor Proxy IPTV Premiere 1 (v30) Ativo!", content_type="text/plain; charset=utf-8"))
+    return adicionar_cabecalhos_streaming(Response("Servidor Proxy IPTV Premiere 1 (v32 Infinite Anti-Freeze Loop)", content_type="text/plain; charset=utf-8"))
 
 @app.route("/debug")
 def debug():
-    carregar_stream_config()
-    linhas_online = [f"<li style='color:#00e676;'><b>{c.get('nome', c.get('user'))}</b> (ID: {c.get('stream_id', 'N/A')}): ONLINE</li>" for c in CONTAS_ONLINE]
-    linhas_bloq = [f"<li style='color:#ff5252;'><b>{c.get('nome', c.get('user'))}</b>: BLOQUEADO</li>" for c in CONTAS_BLOQUEADAS]
-    
-    html = f"""
-    <h2>📊 Diagnóstico v30 (stream_config.json)</h2>
-    <p><b>Contas Carregadas:</b> {len(CONTAS_ONLINE)} | <b>Descartadas:</b> {len(CONTAS_BLOQUEADAS)}</p>
-    <h3>✅ Online</h3>
-    <ul>{''.join(linhas_online) if linhas_online else '<li>Nenhuma</li>'}</ul>
-    <h3>❌ Bloqueadas</h3>
-    <ul>{''.join(linhas_bloq) if linhas_bloq else '<li>Nenhuma</li>'}</ul>
-    """
-    return adicionar_cors(Response(html, content_type="text/html; charset=utf-8"))
+    contas = carregar_configuracao()
+    return adicionar_cabecalhos_streaming(Response(f"Contas Ativas no Pool: {len(contas)}", content_type="text/plain; charset=utf-8"))
 
 @app.route("/playlist.m3u")
 @app.route("/playlist.m3u8")
-@app.route("/playlist")
-@app.route("/get.php")
 def playlist():
     host_base = request.host_url.rstrip("/")
-    m3u_txt = f"#EXTM3U\n#EXTINF:-1 tvg-id=\"Premiere1.br\" tvg-name=\"Premiere 1 FHD\" group-title=\"ESPORTES\",Premiere 1 FHD\n{host_base}/live/premiere1.ts\n"
-    return adicionar_cors(Response(m3u_txt, content_type="application/x-mpegURL"))
+    m3u = f"#EXTM3U\n#EXTINF:-1 tvg-id=\"Premiere1.br\" tvg-name=\"Premiere 1 FHD\",Premiere 1 FHD\n{host_base}/live/premiere1.ts\n"
+    return adicionar_cabecalhos_streaming(Response(m3u, content_type="application/x-mpegURL"))
 
 @app.route("/live/premiere1.ts")
-@app.route("/live/premiere1.m3u8")
 @app.route("/live/premiere.m3u8")
+@app.route("/live/premiere1.m3u8")
 @app.route("/live/premiere.ts")
-@app.route("/live/premiere1")
-@app.route("/live/premiere")
-def stream_premiere():
-    gerador = obter_gerador_stream()
-    if gerador:
-        return adicionar_cors(Response(gerador, content_type="video/mp2t"))
-    return adicionar_cors(Response("Sinal indisponível.", status=503, content_type="text/plain; charset=utf-8"))
+def stream():
+    return adicionar_cabecalhos_streaming(Response(
+        stream_with_context(gerador_loop_infinito_anti_tela_preta()),
+        content_type="video/mp2t"
+    ))
 
 if __name__ == "__main__":
     porta = int(os.environ.get("PORT", 5000))
